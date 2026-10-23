@@ -1,0 +1,24 @@
+kubeconfig.yml
+
+# 1Password / Environment Variables
+.env
+.env.*
+!.env.example
+
+### Claude Code ###
+.claude/
+
+### Node / TypeScript ###
+node_modules/
+dist/
+npm-debug.log*
+*.tsbuildinfo
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### VS Code ###
+.vscode/
