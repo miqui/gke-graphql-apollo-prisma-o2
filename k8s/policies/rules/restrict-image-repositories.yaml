@@ -4,7 +4,7 @@
 # `docker.io/library/postgres`, `prom/prometheus:v2` is `docker.io/prom/prometheus`.
 #
 # Adding a new image to any covered namespace means adding its repository below. One list serves
-# both the enforce (`default`) and audit (`observability`, `headlamp`) copies of this policy.
+# both the enforce (`default`) and audit (`observability`, `headlamp`, `polaris`) copies of this policy.
 apiVersion: policies.kyverno.io/v1
 kind: ValidatingPolicy
 metadata:
@@ -30,8 +30,8 @@ spec:
     - name: allowed
       expression: >-
         [
-          'docker.io/miqui/message-service',
-          'docker.io/miqui/issue-service',
+          'us-central1-docker.pkg.dev/k8s-dev-412419/graphql-apollo-prisma-o2/message-service',
+          'us-central1-docker.pkg.dev/k8s-dev-412419/graphql-apollo-prisma-o2/issue-service',
           'docker.io/library/postgres',
           'docker.io/library/busybox',
           'docker.io/library/nginx',
@@ -44,7 +44,8 @@ spec:
           'docker.io/otel/opentelemetry-collector-contrib',
           'registry.k8s.io/kube-state-metrics/kube-state-metrics',
           'o2cr.ai/openobserve/openobserve',
-          'ghcr.io/headlamp-k8s/headlamp'
+          'ghcr.io/headlamp-k8s/headlamp',
+          'us-docker.pkg.dev/fairwinds-ops/oss/polaris'
         ]
     # Canonical repository of every container. The single-element `[x].map(name, ...)[0]`
     # pattern is just CEL's way of binding a local name. Steps: drop @digest; drop :tag (a colon

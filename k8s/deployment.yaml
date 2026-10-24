@@ -14,8 +14,6 @@ spec:
       labels:
         app: message-service
     spec:
-      nodeSelector:
-        workload: api
       securityContext:
         # runAsUser is set explicitly, not just runAsNonRoot: the image's `USER node` is a name,
         # not a number, so the kubelet can't verify it's non-root on its own. 1000 is node's uid.
@@ -44,13 +42,26 @@ spec:
             - configMapRef:
                 name: message-service-config
             - secretRef:
-                name: postgres-credentials
+                name: message-service-db-credentials
+          env:
+            # Cloud SQL private IP, from the Secret Crossplane writes for the PostgresInstance
+            # (k8s/postgres.yaml). Until that exists the pod shows CreateContainerConfigError
+            # and the kubelet keeps retrying.
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsql-connection
+                  key: privateIP
           command:
             - sh
             - -c
             - |
-              until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER"; do
-                echo "Waiting for postgres at $DB_HOST:$DB_PORT..."
+              # Log in to the service's own database as its own user, not just pg_isready: Cloud
+              # SQL accepts connections minutes before Crossplane has created the database and
+              # user, and `prisma migrate deploy` at startup would crash on them missing.
+              export PGPASSWORD="$DB_PASSWORD" PGSSLMODE="$DB_SSLMODE" PGCONNECT_TIMEOUT=3
+              until psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "Waiting for database $DB_NAME on Cloud SQL at $DB_HOST:$DB_PORT..."
                 sleep 2
               done
         - name: wait-for-hazelcast
@@ -92,8 +103,14 @@ spec:
             - configMapRef:
                 name: message-service-config
             - secretRef:
-                name: postgres-credentials
+                name: message-service-db-credentials
           env:
+            # Cloud SQL private IP, see the wait-for-postgres init container.
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsql-connection
+                  key: privateIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -128,15 +145,28 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 2
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                    - key: app
-                      operator: In
-                      values:
-                        - message-service
-                topologyKey: "kubernetes.io/hostname"
+          # Shutdown: the pod leaves the Service endpoints as soon as it is Terminating, but the
+          # Gateway's load balancer takes a few seconds to notice. Keep serving through that window,
+          # then SIGTERM runs the app's graceful shutdown (src/index.ts). 10s + shutdown < 30s.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+      # Spread replicas: hostname spread handles single-node loss; zone spread puts the 3 replicas
+      # in us-central1-a/b/c (the node pool spans all three, gke-deploy.sh NODE_ZONES), so losing
+      # a zone leaves two serving. ScheduleAnyway, not DoNotSchedule: during a zone outage the dead
+      # zone's NotReady nodes still count as a domain, and a hard constraint would block the
+      # replacement pod from the surviving zones. Voluntary disruptions: k8s/pdb.yaml.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: message-service
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: message-service

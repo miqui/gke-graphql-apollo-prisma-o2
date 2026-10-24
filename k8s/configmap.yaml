@@ -1,3 +1,5 @@
+# DB_HOST isn't here: it's Cloud SQL's private IP, read from the cloudsql-connection Secret that
+# Crossplane writes for the PostgresInstance (k8s/postgres.yaml) - see the Deployments.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,9 +7,15 @@ metadata:
   labels:
     app: message-service
 data:
-  DB_HOST: "postgres"
   DB_PORT: "5432"
   DB_NAME: "messagedb"
+  # Cloud SQL is ENCRYPTED_ONLY. "require" = encrypted, server identity not verified (the server CA
+  # is in cloudsql-connection for verify-ca later). Appended to DATABASE_URL by src/env.ts and used
+  # as PGSSLMODE by the wait-for-postgres init container.
+  DB_SSLMODE: "require"
+  # The Prisma CLI (`prisma migrate deploy` at startup) phones checkpoint.prisma.io for update
+  # notices; the default-deny egress policy blocks that, so don't try.
+  CHECKPOINT_DISABLE: "1"
   OTEL_METRICS_URL: "http://otel-collector.observability.svc.cluster.local:4318/v1/metrics"
   OTEL_TRACES_URL: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
   # Sample 10% of new traces (children follow their parent's decision) - a k6 run
@@ -17,7 +25,8 @@ data:
   HAZELCAST_HOST: "hazelcast"
   HAZELCAST_PORT: "5701"
   # Introspection + the Apollo Sandbox landing page are off in production unless enabled here
-  # (see src/http-config.ts). Fine for this disposable dev cluster; leave it off anywhere real.
+  # (see src/http-config.ts). Fine for this dev cluster, whose API is behind the Cloud Armor
+  # allowlist (k8s/gateway.yaml); leave it off anywhere real.
   GRAPHQL_INTROSPECTION: "true"
 ---
 apiVersion: v1
@@ -27,9 +36,11 @@ metadata:
   labels:
     app: issue-service
 data:
-  DB_HOST: "postgres"
   DB_PORT: "5432"
   DB_NAME: "issuedb"
+  # Same as message-service-config above.
+  DB_SSLMODE: "require"
+  CHECKPOINT_DISABLE: "1"
   OTEL_METRICS_URL: "http://otel-collector.observability.svc.cluster.local:4318/v1/metrics"
   OTEL_TRACES_URL: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
   # Sample 10% of new traces (children follow their parent's decision) - a k6 run
@@ -38,12 +49,3 @@ data:
   OTEL_TRACES_SAMPLER_ARG: "0.1"
   # Same switch as message-service-config above.
   GRAPHQL_INTROSPECTION: "true"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: postgres-config
-  labels:
-    app: postgres
-data:
-  POSTGRES_DB: "messagedb"

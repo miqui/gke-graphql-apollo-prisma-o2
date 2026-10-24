@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-BASE_URL="http://localhost"
+BASE_URL="${BASE_URL:-https://graphql.miqui.dev}"
 GRAPHQL_URL="${BASE_URL}/graphql"
 
 echo "=========================================================="
