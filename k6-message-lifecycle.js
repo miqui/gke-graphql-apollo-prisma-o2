@@ -11,7 +11,7 @@ export const options = {
   },
 };
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost/graphql';
+const BASE_URL = __ENV.BASE_URL || 'https://graphql.miqui.dev/graphql';
 const jsonHeaders = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
 
 const CREATE_AUTHOR_MUTATION = `mutation CreateAuthor($input: CreateAuthorInput!) { createAuthor(input: $input) { id } }`;

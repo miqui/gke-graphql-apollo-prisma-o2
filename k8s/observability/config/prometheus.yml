@@ -1,14 +1,15 @@
 global:
   scrape_interval: 15s
 
-# Replicates the message-service metrics (job "otel-collector" below - the API's
+# Replicates the message-service/issue-service metrics (job "otel-collector" below - the APIs'
 # Node.js/GraphQL/Prisma metrics pushed via OTLP, see src/telemetry.ts) plus
-# kind cluster ops metrics (node-exporter, kube-state-metrics - the same jobs behind
-# the "kind cluster ops" Grafana dashboard) into OpenObserve (see
+# cluster ops metrics (node-exporter, kube-state-metrics - the same jobs behind
+# the "Cluster ops" Grafana dashboard) into OpenObserve (see
 # k8s/observability/openobserve-values.yaml), which exposes a Prometheus
-# remote_write-compatible ingestion endpoint. password_file is mounted from
-# openobserve-prometheus-secret.yaml (see prometheus-deployment.yaml) so the password
-# never has to live in this ConfigMap.
+# remote_write-compatible ingestion endpoint. username_file/password_file are mounted from
+# the openobserve-remote-write-credentials Secret (External Secrets, see
+# externalsecrets.yaml and prometheus-deployment.yaml) so the credentials never have to
+# live in this ConfigMap.
 #
 # write_relabel_configs keeps only these jobs: an earlier attempt at forwarding every
 # scraped job (in particular kubernetes-nodes-cadvisor's per-container series) was
@@ -18,14 +19,20 @@ global:
 # added. node-exporter/kube-state-metrics are being added back in deliberately, one
 # step at a time, verifying no overflow before adding kubernetes-nodes-cadvisor (by
 # far the highest-cardinality job) on top - see openobserve-values.yaml's resources,
-# bumped in the same step, and its 3-day ZO_COMPACT_DATA_RETENTION_DAYS (kind's
-# default StorageClass doesn't enforce persistence.size as a real quota, so unbounded
-# retention on wider data risks unbounded disk growth on the Docker Desktop VM).
+# bumped in the same step, and its 3-day ZO_COMPACT_DATA_RETENTION_DAYS (OpenObserve's
+# PVC is a fixed 5Gi persistent disk; unbounded retention on wider data would fill it).
 remote_write:
   - url: http://openobserve.observability.svc.cluster.local:5080/api/default/prometheus/api/v1/write
     basic_auth:
-      username: root@example.com
+      username_file: /etc/prometheus/openobserve-auth/username
       password_file: /etc/prometheus/openobserve-auth/password
+    # Cap the parallel senders. The default (max_shards 50) lets Prometheus reshard up to ~44
+    # while OpenObserve isn't up yet (first minutes of every bootstrap): each shard buffers up to
+    # `capacity` samples, and that backlog OOMKilled Prometheus at 512Mi (seen 2026-10-05). A few
+    # shards is plenty for these four jobs; the WAL keeps anything not yet sent.
+    queue_config:
+      max_shards: 4
+      capacity: 2500
     write_relabel_configs:
       - source_labels: [job]
         regex: 'otel-collector|node-exporter|kube-state-metrics|kubernetes-nodes-cadvisor'
@@ -48,12 +55,11 @@ scrape_configs:
     static_configs:
       - targets: ['openobserve.observability.svc.cluster.local:5080']
 
-  # postgres runs in the default namespace (see k8s/postgres-statefulset.yaml), not
-  # observability; postgres-exporter is a sidecar in that same pod, reached via the postgres
-  # headless Service's "metrics" port.
+  # Postgres is Cloud SQL (k8s/postgres.yaml); postgres-exporter is a Deployment in the
+  # default namespace connecting to it over its private IP.
   - job_name: 'postgres-exporter'
     static_configs:
-      - targets: ['postgres.default.svc.cluster.local:9187']
+      - targets: ['postgres-exporter.default.svc.cluster.local:9187']
 
   # jmx_prometheus_javaagent attached to the Hazelcast member's own JVM (see
   # k8s/hazelcast-deployment.yaml) - Management Center's own Prometheus exporter
@@ -64,6 +70,17 @@ scrape_configs:
   - job_name: 'hazelcast'
     static_configs:
       - targets: ['hazelcast.default.svc.cluster.local:9404']
+
+  # Trivy Operator (k8s/argocd/apps/trivy-operator.yaml): per-workload counts of
+  # vulnerabilities, config-audit/RBAC/infra findings, exposed secrets and compliance status.
+  # Feeds the "Trivy Security" Grafana dashboard only - deliberately not in the remote_write
+  # keep list above (the counts change only when a scan finishes, and OpenObserve's MemTable
+  # headroom is reserved for the ops jobs). The chart's Service is headless (clusterIP: None),
+  # so its name resolves straight to the operator pod and its port-80 -> targetPort mapping
+  # never applies: scrape the container's own metrics port, 8080.
+  - job_name: 'trivy-operator'
+    static_configs:
+      - targets: ['trivy-operator.trivy-system.svc.cluster.local:8080']
 
   # node-exporter runs hostNetwork, so its pod IP == the node's IP; scraped directly
   - job_name: 'node-exporter'

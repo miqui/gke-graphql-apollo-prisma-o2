@@ -1,53 +1,66 @@
 # ArgoCD — commands & troubleshooting
 
-Day-to-day ArgoCD commands for this repo's local kind cluster. Everything is `kubectl`-based: the
+Day-to-day ArgoCD commands for this repo's GKE dev cluster. Everything is `kubectl`-based: the
 `argocd` CLI isn't installed here (an optional CLI section is at the end). For the design — what
 ArgoCD owns and why — see the "Continuous Deployment with ArgoCD" section of `README.md`; for
 `argocd-repo-server` liveness-probe failures see `KUBECTL.md`.
 
-Commands marked ✅ were run against this cluster while writing this; the rest are standard ArgoCD /
-kubectl usage that I did not run here.
+These commands were carried over from the sibling gRPC platform (`gke-quarkus-grpc-o2-multi`), where
+they were run against its cluster; they have **not yet been run against this one**. Names are adapted
+to this repo.
 
 ## What's in the cluster
 
-| Thing | Name | Defined in |
+Everything is an Application, created by the `root` Application (app of apps) from
+`k8s/argocd/apps/`; `gke-bootstrap.sh` only Helm-installs Argo CD and applies
+`k8s/argocd/root-application.yaml`.
+
+| Application | Wave | Owns |
 | :--- | :--- | :--- |
-| Application: `default` namespace (Postgres, Hazelcast, both APIs, Ingress, quotas) | `graphql-apollo-prisma-o2` | `k8s/argocd/application.yaml`, syncs `k8s/` |
-| Application: Kyverno policies + PolicyExceptions | `kyverno-policies` | `k8s/argocd/policies-application.yaml`, syncs `k8s/policies/` |
-| Application: observability stack (OTel Collector, Prometheus, Grafana + dashboards, kube-state-metrics, node-exporter, log collector, the namespace) | `observability` | `k8s/argocd/observability-application.yaml`, syncs `k8s/observability/` |
-| Image Updater config | `ImageUpdater/graphql-apollo-prisma-o2` | `k8s/argocd/image-updater.yaml` |
-| UI | `http://argocd.localhost/` | `k8s/argocd/ingress.yaml` |
+| `root` | - | every file in `k8s/argocd/apps/` |
+| `argocd` | -4 | Argo CD itself (chart `argo/argo-cd` + `k8s/argocd/argocd-values.yaml`); never prunes |
+| `external-secrets` | -4 | External Secrets Operator (chart + `k8s/external-secrets/values.yaml`) |
+| `crossplane` | -4 | Crossplane core (chart + `k8s/crossplane/values.yaml`) |
+| `kyverno` | -3 | Kyverno (chart + `k8s/kyverno/kyverno-values.yaml`) |
+| `platform` | -3 | `k8s/platform/`: ClusterSecretStore, Crossplane GCP SQL provider/functions/ClusterProviderConfig, `PostgresInstance` XRD + Composition |
+| `kyverno-policies` | -2 | `k8s/policies/` |
+| `observability` | -1 | `k8s/observability/` (OTel Collector, Prometheus, Grafana + dashboards, kube-state-metrics, node-exporter, log collector, ExternalSecrets, NetworkPolicies, the namespace) |
+| `headlamp` | -1 | chart + `k8s/headlamp/headlamp-values.yaml` + `k8s/headlamp/manifests/` |
+| `polaris` | -1 | chart + `k8s/polaris/polaris-values.yaml` + `k8s/polaris/manifests/` |
+| `trivy-operator` | -1 | chart + `k8s/trivy-operator/trivy-operator-values.yaml` |
+| `argocd-image-updater` | -1 | chart + `k8s/argocd/image-updater-values.yaml` + the `ImageUpdater` CR in `k8s/argocd/image-updater/` |
+| `openobserve` | 0 | chart + `k8s/observability/openobserve-values.yaml` |
+| `graphql-api` | 1 | `k8s/`: `PostgresInstance` (Cloud SQL, two databases/users), message-service, issue-service, Hazelcast, postgres-exporter, Gateway, NetworkPolicies, PDBs, quota |
 
-All three Applications track `main` with `automated: {prune: true, selfHeal: true}`. **Not** managed by
-ArgoCD: OpenObserve, Headlamp and Kyverno themselves (all Helm installs done by `deploy-kind.sh`;
-only the Kyverno *policies* are an Application).
+All track `main` with `automated: {prune: true, selfHeal: true}` (except `argocd`: no prune). UI:
+`./gke-port-forward.sh argocd` -> `https://localhost:8081`.
 
-ArgoCD components in the `argocd` namespace: `argocd-server`, `argocd-repo-server`,
-`argocd-redis`, `argocd-dex-server`, `argocd-applicationset-controller`,
-`argocd-notifications-controller`, `argocd-image-updater-controller` (Deployments) and
-`argocd-application-controller` (StatefulSet).
+Three `argocd-cm` customizations in `argocd-values.yaml` matter for this layout: the Application
+health check (without it sync waves wouldn't wait for a child to be Healthy), Crossplane health checks
+(so Cloud SQL provisioning shows as Progressing, not Healthy), and `controller.diff.server.side`
+(client-side diff misreads the big server-side-applied CRDs as permanently OutOfSync).
 
 ## Status
 
 ```bash
-kubectl get applications -n argocd                                                       # ✅ sync + health at a glance
+kubectl get applications -n argocd                                                       # sync + health at a glance
 
 # one Application: sync status, health, deployed commit, last operation
-kubectl get application graphql-apollo-prisma-o2 -n argocd \
-  -o jsonpath='{.status.sync.status} {.status.health.status} rev={.status.sync.revision} {.status.operationState.phase}{"\n"}'   # ✅
+kubectl get application graphql-api -n argocd \
+  -o jsonpath='{.status.sync.status} {.status.health.status} rev={.status.sync.revision} {.status.operationState.phase}{"\n"}'
 
 # per-resource status (spot the OutOfSync / Degraded one)
-kubectl get application graphql-apollo-prisma-o2 -n argocd \
-  -o jsonpath='{range .status.resources[*]}{.kind}/{.name} {.status} {.health.status}{"\n"}{end}'                              # ✅
+kubectl get application graphql-api -n argocd \
+  -o jsonpath='{range .status.resources[*]}{.kind}/{.name} {.status} {.health.status}{"\n"}{end}'
 
 # errors (ComparisonError, SyncError, ...) - empty output means none
-kubectl get application graphql-apollo-prisma-o2 -n argocd -o jsonpath='{.status.conditions}{"\n"}'                          # ✅
+kubectl get application graphql-api -n argocd -o jsonpath='{.status.conditions}{"\n"}'
 
 # last deployments: id, commit, time
-kubectl get application graphql-apollo-prisma-o2 -n argocd \
-  -o jsonpath='{range .status.history[-3:]}{.id} {.revision} {.deployedAt}{"\n"}{end}'                                        # ✅
+kubectl get application graphql-api -n argocd \
+  -o jsonpath='{range .status.history[-3:]}{.id} {.revision} {.deployedAt}{"\n"}{end}'
 
-kubectl describe application graphql-apollo-prisma-o2 -n argocd                          # everything above plus events
+kubectl describe application graphql-api -n argocd                          # everything above plus events
 ```
 
 Compare the deployed commit with `main`: `git rev-parse origin/main` vs `.status.sync.revision`. A
@@ -55,7 +68,7 @@ merge is only live once these match — ArgoCD polls git roughly every 3 minutes
 merge it is normal for the Application to still show the previous commit.
 
 **Health `Progressing`** right after a merge is usually just a rolling update in flight
-(`kubectl rollout status deploy/message-service`); it goes back to `Healthy` on its own.
+(`kubectl rollout status deploy/graphql-api`); it goes back to `Healthy` on its own.
 
 ## Forcing a refresh or a sync (without the CLI)
 
@@ -69,7 +82,7 @@ kubectl annotate application kyverno-policies -n argocd argocd.argoproj.io/refre
 kubectl annotate application kyverno-policies -n argocd argocd.argoproj.io/refresh=hard --overwrite
 
 # Trigger a sync operation (what the UI's "Sync" button does)
-kubectl patch application graphql-apollo-prisma-o2 -n argocd --type merge \
+kubectl patch application graphql-api -n argocd --type merge \
   -p '{"operation":{"sync":{"prune":true}}}'
 ```
 
@@ -78,18 +91,20 @@ syncs by itself.
 
 ## Image Updater
 
-CI pushes `docker.io/miqui/<service>:<yyyymmddHHMMSS>-<sha7>`; Image Updater picks the newest tag
-(`alphabetical` strategy) roughly every 2 minutes and writes it into the Application — **no git
-commit is made**.
+CI pushes `us-central1-docker.pkg.dev/k8s-dev-412419/graphql-apollo-prisma-o2/{message,issue}-service:<yyyymmddHHMMSS>-<sha7>`;
+Image Updater picks the newest tag per image (`alphabetical` strategy) roughly every 2 minutes and writes it
+into the Application — **no git commit is made**. It reads Artifact Registry with a short-lived
+token from the GKE metadata server (Workload Identity, `gql-image-updater` GSA, read-only); the
+root Application ignores `/spec/source/kustomize` on `graphql-api` so it doesn't revert the update.
 
 ```bash
 # the tag each service is currently pinned to (the override lives on the Application, not in git)
-kubectl get application graphql-apollo-prisma-o2 -n argocd \
-  -o jsonpath='{.spec.source.kustomize.images}{"\n"}'                                     # ✅
+kubectl get application graphql-api -n argocd \
+  -o jsonpath='{.spec.source.kustomize.images}{"\n"}'
 
-kubectl get imageupdater -n argocd                                                        # ✅ READY, LAST CHECKED
-kubectl logs -n argocd deploy/argocd-image-updater-controller --tail=20                   # ✅
-kubectl logs -n argocd deploy/argocd-image-updater-controller | grep 'images_updated'     # ✅ per-cycle summary
+kubectl get imageupdater -n argocd                                                        # READY, LAST CHECKED
+kubectl logs -n argocd deploy/argocd-image-updater-controller --tail=20
+kubectl logs -n argocd deploy/argocd-image-updater-controller | grep 'images_updated'     # per-cycle summary
 ```
 
 A healthy idle cycle logs `images_considered=2 images_skipped=0 images_updated=0 errors=0`. To
@@ -97,7 +112,7 @@ confirm a rollout picked up a build, compare the tag above with the pods':
 
 ```bash
 kubectl get pods -n default -l 'app in (message-service,issue-service)' \
-  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.containers[0].image}{"\n"}{end}'  # ✅
+  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.containers[0].image}{"\n"}{end}'
 ```
 
 Image tags end in the short SHA of the commit that was built, so `…-3755170` is the build of merge
@@ -111,11 +126,11 @@ auto-sync first — and remember to restore it.
 
 ```bash
 # pause: remove the automated block (manual sync still works)
-kubectl patch application graphql-apollo-prisma-o2 -n argocd --type json \
+kubectl patch application graphql-api -n argocd --type json \
   -p '[{"op":"remove","path":"/spec/syncPolicy/automated"}]'
 
 # restore
-kubectl patch application graphql-apollo-prisma-o2 -n argocd --type merge \
+kubectl patch application graphql-api -n argocd --type merge \
   -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}'
 ```
 
@@ -123,14 +138,11 @@ While paused, `kubectl get application …` will show `OutOfSync` for anything y
 
 ## Drift you should expect
 
-`postgres-credentials` is a committed placeholder (`k8s/secret.yaml`) that `deploy-kind.sh`
-overwrites with real values. `application.yaml` tells ArgoCD to ignore that Secret's data
-(`ignoreDifferences` + `RespectIgnoreDifferences=true`), so it never shows as `OutOfSync` and a sync
-never puts the placeholder back.
+**Secrets don't drift.** Git holds `ExternalSecret`s, not Secrets; External Secrets owns the actual
+Secrets (built from GCP Secret Manager), so there's no placeholder for a sync to write back.
 
-`grafana-credentials` and `openobserve-remote-write-credentials` (the `observability` Application) are the
-same story: committed placeholders that `deploy-kind.sh` overwrites, ignored via `ignoreDifferences`
-+ `RespectIgnoreDifferences=true` in `observability-application.yaml`.
+**The image tags** on `graphql-api` differ from git on purpose (Image Updater's override); the root
+Application ignores that field.
 
 **Hash-suffixed ConfigMaps.** `prometheus-config-<hash>`, `otel-collector-config-<hash>` and
 `log-collector-config-<hash>` are generated by kustomize (`configMapGenerator` in
@@ -148,25 +160,8 @@ unmerged branch is undone on the next reconcile. Change it in git and merge inst
 **The `observability` namespace is never pruned** (`argocd.argoproj.io/sync-options: Prune=false` in
 `k8s/observability/namespace.yaml`): deleting the namespace would take OpenObserve's PVC with it.
 
-**One-time bootstrap on an existing cluster** (a fresh `deploy-kind.sh` does this itself): the
-Application can't create itself, so after the PR that adds it is merged:
-
-```bash
-kubectl apply -f k8s/argocd/observability-application.yaml
-kubectl get application observability -n argocd   # expect Synced; Argo adopts the existing objects
-```
-
-Adoption changes only the Namespace annotation, swaps the three ConfigMaps for their hash-named copies,
-and rolls Prometheus, the OTel Collector and the log collector once (their volume reference changed).
-
-Argo only prunes objects it has tracked, and the pre-existing un-suffixed `prometheus-config`,
-`otel-collector-config` and `log-collector-config` were applied by kubectl, so they are left behind as
-unreferenced orphans. Once the three workloads have rolled, remove them by hand (a fresh cluster never
-has them):
-
-```bash
-kubectl delete configmap prometheus-config otel-collector-config log-collector-config -n observability
-```
+**Adding a new Application**: add a file to `k8s/argocd/apps/` (with a sync-wave annotation) and
+merge - the root Application picks it up. Nothing is applied by hand.
 
 ## Rolling back
 
@@ -192,16 +187,20 @@ next reconcile once the repo-server is back, and the fix for the restarts themse
 `KUBECTL.md` ("Diagnosing `argocd-repo-server` liveness probe failures").
 
 ```bash
-kubectl get pod -n argocd -l app.kubernetes.io/name=argocd-repo-server        # ✅ RESTARTS column
-kubectl logs -n argocd deploy/argocd-repo-server --since=10m | grep '"level":"error"'   # ✅
+kubectl get pod -n argocd -l app.kubernetes.io/name=argocd-repo-server        # RESTARTS column
+kubectl logs -n argocd deploy/argocd-repo-server --since=10m | grep '"level":"error"'
 kubectl logs -n argocd statefulset/argocd-application-controller --since=10m            # sync/compare decisions
 kubectl get events -n argocd --sort-by=.lastTimestamp
 ```
 
 **Merged but nothing changed.** In order: is `.status.sync.revision` the merge commit yet (poll
-delay, or a `ComparisonError` above)? Is the change under `k8s/` at all — `k8s/observability/` is
-**not** synced and must be applied by hand? For a new image: did CI push it, and does the
-Image Updater log show `images_updated=1`?
+delay, or a `ComparisonError` above)? Is the file actually referenced - listed in its directory's
+`kustomization.yaml`, or in a directory an Application syncs? For a new image: did CI push it, and
+does the Image Updater log show `images_updated=1`?
+
+**A wave is stuck.** `kubectl get applications -n argocd`: the root Application only starts wave N+1
+once every wave-N Application is Healthy. `graphql-api` staying Progressing for ~15 minutes on a fresh
+cluster is Cloud SQL being created (`kubectl get postgresinstance,managed`).
 
 **Stuck `Progressing` / `Degraded`.** Find the resource with the per-resource query above, then
 debug that resource (`kubectl describe`, `kubectl get events`). A Deployment rejected by Kyverno in
@@ -213,25 +212,23 @@ ArgoCD applies them — see the "Working with the policies" section of `README.m
 ## Login
 
 ```bash
-# UI: http://argocd.localhost/  - user admin, password:
+./gke-port-forward.sh argocd       # https://localhost:8081 (self-signed cert), user admin, password:
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-(`argocd-initial-admin-secret` exists on this cluster ✅; ArgoCD's docs recommend deleting it after
-you change the password.)
+(ArgoCD's docs recommend deleting `argocd-initial-admin-secret` after you change the password.)
 
 ## Optional: the `argocd` CLI
 
-Not installed here, and none of the commands below were run. `argocd-server` is patched with
-`--insecure` and reached through the plain-HTTP `*.localhost` Ingress, hence the flags:
+Not installed here, and none of the commands below were run. With the port-forward above running:
 
 ```bash
-argocd login argocd.localhost --plaintext --grpc-web --username admin
+argocd login localhost:8081 --insecure --grpc-web --username admin   # --insecure: self-signed cert
 
 argocd app list
-argocd app get graphql-apollo-prisma-o2
-argocd app diff graphql-apollo-prisma-o2          # live vs git
-argocd app sync graphql-apollo-prisma-o2
-argocd app history graphql-apollo-prisma-o2
-argocd app set graphql-apollo-prisma-o2 --sync-policy none      # pause auto-sync
+argocd app get graphql-api
+argocd app diff graphql-api          # live vs git
+argocd app sync graphql-api
+argocd app history graphql-api
+argocd app set graphql-api --sync-policy none      # pause auto-sync
 ```
