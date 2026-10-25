@@ -6,8 +6,8 @@ A record of moving this project from a local kind cluster to GKE in project `k8s
 deploy, most of which are already fixed in the scripts copied from it). Operating instructions are
 in [README.md](README.md#deployment-to-gke).
 
-**Status (2026-10-23): prepared, not deployed.** Manifests and scripts are written and checked
-offline (see [Verified so far](#verified-so-far)); no GCP resource has been created yet.
+**Status (2026-10-25): deployed.** First deploy of `graphql-cluster` succeeded; both APIs answer on
+`https://graphql.miqui.dev` (see [First deploy](#first-deploy-2026-10-25)).
 
 ## Decisions
 
@@ -61,7 +61,7 @@ which is the same value the gRPC platform sets.
 `k8s/headlamp/resourcequota.yaml` (moved to `k8s/headlamp/manifests/`),
 `k8s/policies/exceptions/headlamp-admin.yaml`. All of it is in the baseline commit on `main`.
 
-## Verified so far
+## Verified before deploying
 
 Offline only:
 
@@ -73,31 +73,51 @@ Offline only:
 | `tsc --noEmit` for both services after the `env.ts` change | passes |
 | `bash -n` on all scripts; YAML parse of `k8s/` and workflows | passes |
 
+## First deploy (2026-10-25)
+
+`gke-deploy.sh` -> `gke-secrets-seed.sh` -> `gke-bootstrap.sh`, all through `op run`, no script changes.
+
+| Check | Result |
+| --- | --- |
+| `gke-deploy.sh` | all 27 steps, exit 0; Cloudflare A + validation CNAME upserted via the API |
+| CI (`main`) | image push works once `GCP_WIF_PROVIDER`/`GCP_CI_SA` are set; first tags `<timestamp>-2dfc804` |
+| Argo CD | all 14 Applications Synced + Healthy; Image Updater switched both services to the timestamp tag |
+| Cloud SQL (Crossplane) | instance ready in ~10 min (private IP 10.16.0.3); 2 databases + 2 users created |
+| Certificate | ACTIVE ~35 min after `gke-deploy.sh`; the LB served it a further ~2 min later |
+| Public endpoints | `/health/readiness` and `/issues/health/readiness` 200; DB-backed query works; HTTP -> HTTPS 301; Apollo Sandbox loads on `/graphql` and `/issues/graphql` |
+
+What got in the way (none of it in the repo):
+
+- **1Password service account token expired.** `op` returned `403 Forbidden` for everything (in every
+  project, not just this one). Rotating the token fixed it; a Claude Code session started before
+  the rotation keeps the old token in its environment until it is restarted from a fresh shell.
+- **1Password item title with a leading space** (`" gql-postgres-message"`) doesn't match
+  `op://dev-vault/gql-postgres-message/...`. Renamed in 1Password.
+- **CI on `main` fails until the repository variables exist** (auth step:
+  `must specify exactly one of "workload_identity_provider" or "credentials_json"`). Expected between
+  merging and the first `gke-deploy.sh`; re-running the failed runs afterwards pushed the first images.
+
 ## Open items
 
-Check these on the first deploy:
-
-1. **Cloud SQL users are not privilege-isolated.** Users created through the Cloud SQL API are
-   members of `cloudsqlsuperuser`, which owns API-created databases, so `message_app` can still
-   connect to `issuedb` and the other way round. Separate passwords limit what one leaked
-   credential *names*, not what it can reach. Real isolation needs a SQL step, run as an admin user:
-   make each user own its database, `REVOKE CONNECT ... FROM PUBLIC`, and drop the
-   `cloudsqlsuperuser` membership. Not done yet.
-2. **`/issues` prefix rewrite on the GKE Gateway.** `ReplacePrefixMatch: /` must turn
-   `/issues/graphql` into `/graphql`, not `//graphql`. `gke-bootstrap.sh` and `test-api.sh` both
-   hit `/issues/...`, so a failure shows up immediately.
-3. **`function-go-templating:v0.10.0`**: the version pin is from memory; confirm the package
-   resolves (`kubectl get functions`) on the first sync.
-4. **Node pool size.** Two APIs at 3-6 replicas each (250m / 512Mi requests) on top of the platform
-   the gRPC project needed ~4 nodes for. `MAX_NODES=6` may be tight at full HPA scale; raise it in
-   `gke-deploy.sh` if pods stay Pending.
+1. **Cloud SQL users are not privilege-isolated** - *accepted for this short-lived dev cluster.*
+   Users created through the Cloud SQL API are members of `cloudsqlsuperuser`, which owns
+   API-created databases, so `message_app` can still connect to `issuedb` and the other way round.
+   Real isolation would need a SQL step run as an admin user (each user owns its database,
+   `REVOKE CONNECT ... FROM PUBLIC`, drop the `cloudsqlsuperuser` membership). The two 1Password
+   items deliberately hold the same password on this cluster.
+2. ~~`/issues` prefix rewrite on the GKE Gateway~~ - **resolved**: `ReplacePrefixMatch: /` turns
+   `/issues/graphql` into `/graphql`; issue-service answers on `https://graphql.miqui.dev/issues/graphql`.
+3. ~~`function-go-templating:v0.10.0`~~ - **resolved**: the package resolves and the composition's
+   loop created both `Database`s and `User`s.
+4. **Node pool size** - `MAX_NODES=6` is enough. Steady state is 5 nodes (the autoscaler touched 6
+   during the first rollout, while old and new ReplicaSets overlapped, then scaled down). Actual CPU
+   use is ~1.6 cores, but requests are ~7.1 of ~9.6 allocatable cores: per-node DaemonSets (GKE
+   networking/logging, node-exporter, log-collector) take ~0.55 of each e2-standard-2's ~1.93. Both
+   HPAs at 6 replicas add 1.5 cores, which fits with a 6th node. If a load test leaves pods
+   Pending, lower the APIs' CPU requests (250m; they use a fraction of it) or raise `MAX_NODES`.
 5. **Cost.** The GKE free-tier credit covers the control plane (~$0.10/h) of one zonal cluster per
-   billing account. On 2026-10-23 the project had no clusters (the gRPC platform was torn down), so
-   this cluster should get it unless another project on the billing account runs one; if both
-   platforms run at once, the second one pays. Nodes, the Cloud SQL instance and the load balancer
-   are billed either way.
+   billing account; only one platform cluster runs at a time, so this one gets it. Nodes, the Cloud
+   SQL instance and the load balancer are billed while the cluster is up - tear down with
+   `gke-teardown.sh` when done.
 6. **Docs still mention kind** in places: `KUBECTL.md`, `EXAMPLES.md` (`localhost` URLs), `DB.md`,
    `TRACING.md`, `KYVERNO.md`, `LOGS.md`, `HELM.md`, `NEW-PROJECT-BLUEPRINT.md`.
-7. **Before the first bootstrap**: create the GitHub repo `miqui/gke-graphql-apollo-prisma-o2`
-   (public), push `main`, set the repository variables `GCP_WIF_PROVIDER`/`GCP_CI_SA`, and add
-   the two new 1Password items for `MESSAGE_DB_PASSWORD`/`ISSUE_DB_PASSWORD` to your `.env`.
