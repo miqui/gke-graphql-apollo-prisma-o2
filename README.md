@@ -40,6 +40,9 @@ port-forward only, through the IP-locked, IAM-authenticated GKE API server.
 
 ## Architecture
 
+The GKE setup (request path, GitOps flow, Crossplane, secrets, telemetry) is drawn in
+[gke-architecture.drawio](gke-architecture.drawio) - open it with draw.io / diagrams.net.
+
 - **API**: Apollo Server (`src/schema.ts` typeDefs) -> resolvers (`src/resolvers.ts`) -> Prisma Client
   (`src/prisma.ts`), served over Express at `POST /graphql`.
 - **Data model**: `Author` (id, name, email) has many `Message`s (id, title, content, `version` for
