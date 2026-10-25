@@ -91,8 +91,11 @@ Check these on the first deploy:
 4. **Node pool size.** Two APIs at 3-6 replicas each (250m / 512Mi requests) on top of the platform
    the gRPC project needed ~4 nodes for. `MAX_NODES=6` may be tight at full HPA scale; raise it in
    `gke-deploy.sh` if pods stay Pending.
-5. **Cost.** A second zonal cluster in the same billing account doesn't get the GKE free-tier
-   control-plane credit (~$0.10/h), on top of the nodes, the Cloud SQL instance and the load balancer.
+5. **Cost.** The GKE free-tier credit covers the control plane (~$0.10/h) of one zonal cluster per
+   billing account. On 2026-10-23 the project had no clusters (the gRPC platform was torn down), so
+   this cluster should get it unless another project on the billing account runs one; if both
+   platforms run at once, the second one pays. Nodes, the Cloud SQL instance and the load balancer
+   are billed either way.
 6. **Docs still mention kind** in places: `KUBECTL.md`, `EXAMPLES.md` (`localhost` URLs), `DB.md`,
    `TRACING.md`, `KYVERNO.md`, `LOGS.md`, `HELM.md`, `NEW-PROJECT-BLUEPRINT.md`.
 7. **Before the first bootstrap**: create the GitHub repo `miqui/gke-graphql-apollo-prisma-o2`
